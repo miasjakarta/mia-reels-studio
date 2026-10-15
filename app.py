@@ -60,51 +60,95 @@ def ai_scenes(topic, api_key, model):
         raise ValueError('AI 대본이 5개 장면 형식이 아닙니다.')
     return scenes
 
-def create_frame(text, index, photo=None, theme='블루', size=(1080,1920)):
+def _fit_caption(draw, text, width, height, scale):
+    """Fit Korean text to a legible card without clipping."""
+    text = text.strip()
+    for pt in [int(v * scale) for v in (88, 82, 76, 70, 64, 58, 52, 46)]:
+        ft = font(max(20, pt))
+        lines = wrap_korean(draw, text, ft, width)
+        bbox = draw.textbbox((0, 0), '가나다', font=ft)
+        step = max(24, bbox[3]-bbox[1] + int(24*scale))
+        if len(lines)*step <= height:
+            return ft, lines, step
+    # Exceptionally long scripts are shortened for visual readability only;
+    # full script still goes to narration.
+    preview = text[:78].rstrip() + ('…' if len(text)>78 else '')
+    ft=font(max(20,int(46*scale)))
+    lines=wrap_korean(draw, preview, ft, width)
+    bbox=draw.textbbox((0,0),'가나다',font=ft)
+    return ft, lines, max(24,bbox[3]-bbox[1]+int(20*scale))
+
+
+def create_frame(text, index, photo=None, theme='블루', size=(1080,1920), style='생활정보 + 감각적인 영상'):
+    """Create mobile-first editorial information cards using PIL only."""
     w,h=size
-    colors={'블루':((11,30,65),(24,111,174)), '크림':((35,39,49),(155,117,87)), '그린':((11,55,54),(25,115,90))}
-    a,b=colors[theme]
-    # A 1-pixel-wide gradient avoids thousands of expensive full-width draw operations.
+    s=w/1080.0
+    X=lambda n: int(n*s)
+    schemes={
+        '블루': ((10,24,42),(16,58,78),(65,207,192)),
+        '크림': ((44,32,32),(104,64,61),(255,196,116)),
+        '그린': ((9,37,35),(20,75,61),(157,226,145)),
+    }
+    top,bottom,accent=schemes.get(theme,schemes['블루'])
     gradient=Image.new('RGB',(1,h))
-    grad_pixels=gradient.load()
+    px=gradient.load()
     for y in range(h):
-        t=y/max(h-1,1)
-        grad_pixels[0,y]=tuple(int(a[k]*(1-t)+b[k]*t) for k in range(3))
+        t=y/max(1,h-1)
+        px[0,y]=tuple(int(top[k]*(1-t)+bottom[k]*t) for k in range(3))
     im=gradient.resize((w,h))
-    if photo is not None:
-        photo=ImageOps.fit(photo.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS,centering=(.5,.5))
-        photo=photo.filter(ImageFilter.GaussianBlur(1))
-        im=Image.blend(im,photo,.58)
-        overlay=Image.new('RGBA',(w,h),(0,0,0,0))
-        od=ImageDraw.Draw(overlay)
-        od.rectangle((0,0,w,h),fill=(0,0,0,75))
-        im=Image.alpha_composite(im.convert('RGBA'),overlay).convert('RGB')
-    d=ImageDraw.Draw(im)
-    d.rounded_rectangle((70,105,530,180),radius=26,fill=(255,255,255))
-    d.text((100,119),'MIA REELS STUDIO',font=font(37),fill=(18,50,72))
-    d.text((78,240),f'{index+1:02d} / 05',font=font(48),fill=(255,255,255))
-    main=font(79 if len(text)<55 else 66)
-    lines=wrap_korean(d,text,main,w-150)
-    spacing=31
-    bbox=d.textbbox((0,0),'가나다',font=main)
-    line_h=(bbox[3]-bbox[1])+spacing
-    y=max(580,(h-line_h*len(lines))//2)
+    photo_used=photo is not None
+    if photo_used:
+        shot=ImageOps.fit(photo.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS,centering=(.5,.47))
+        shot=shot.filter(ImageFilter.GaussianBlur(max(0.5,1.0*s)))
+        im=Image.blend(im,shot,0.77)
+        veil=Image.new('RGBA',(w,h),(0,0,0,0)); v=ImageDraw.Draw(veil)
+        for j in range(16):
+            y0=int(h*j/16)
+            opacity=int(80 + 116*j/15)
+            v.rectangle((0,y0,w,int(h*(j+1)/16)+2),fill=(5,11,20,opacity))
+        im=Image.alpha_composite(im.convert('RGBA'),veil).convert('RGB')
+    else:
+        # Abstract art makes a useful fallback when licensed photos are absent.
+        decor=Image.new('RGBA',(w,h),(0,0,0,0)); d0=ImageDraw.Draw(decor)
+        d0.ellipse((X(600),X(70),X(1400),X(870)),fill=(*accent,35),outline=(*accent,105),width=X(5))
+        d0.ellipse((X(-400),X(580),X(560),X(1540)),outline=(255,255,255,32),width=X(5))
+        d0.rounded_rectangle((X(670),X(380),X(1070),X(830)),radius=X(75),outline=(*accent,105),width=X(4))
+        im=Image.alpha_composite(im.convert('RGBA'),decor).convert('RGB')
+    lay=Image.new('RGBA',(w,h),(0,0,0,0)); d=ImageDraw.Draw(lay)
+    m=X(64)
+    # Brand and section header.
+    d.rounded_rectangle((m,X(116),X(430),X(188)),radius=X(30),fill=(*accent,245))
+    d.text((X(91),X(130)),'MIA  /  JAKARTA',font=font(X(36)),fill=(8,23,32,255))
+    tag=['한눈에 보기','첫 번째 팁','두 번째 팁','세 번째 팁','저장해 두세요'][min(index,4)]
+    d.text((m,X(268)),f'{index+1:02d}   {tag}',font=font(X(49)),fill=(255,255,255,250),stroke_width=X(1),stroke_fill=(0,0,0,120))
+    d.rounded_rectangle((m,X(374),w-m,X(385)),radius=X(5),fill=(*accent,245))
+    # Subtitles are the star: a large semi-opaque card with ample padding.
+    card_top=X(700 if style.startswith('생활정보') else 840)
+    card_bottom=X(1530)
+    d.rounded_rectangle((m,card_top,w-m,card_bottom),radius=X(45),fill=(8,17,30,211),outline=(255,255,255,55),width=max(1,X(2)))
+    d.rounded_rectangle((X(104),card_top+X(48),X(238),card_top+X(61)),radius=X(6),fill=(*accent,255))
+    d.text((X(105),card_top+X(94)),'JAKARTA LIFE TIPS',font=font(X(35)),fill=(*accent,255))
+    max_text_height=card_bottom-(card_top+X(220))-X(62)
+    ft,lines,step=_fit_caption(d,text,w-X(210),max_text_height,s)
+    yy=card_top+X(215)
     for line in lines:
-        bb=d.textbbox((0,0),line,font=main)
-        x=(w-(bb[2]-bb[0]))//2
-        d.text((x+3,y+4),line,font=main,fill=(0,0,0),stroke_width=4,stroke_fill=(0,0,0))
-        d.text((x,y),line,font=main,fill=(255,255,255),stroke_width=1,stroke_fill=(255,255,255))
-        y+=line_h
-    d.rounded_rectangle((78,h-240,w-78,h-226),radius=7,fill=(255,255,255,75))
-    d.rounded_rectangle((78,h-240,78+(w-156)*(index+1)//5,h-226),radius=7,fill=(255,255,255))
-    d.text((78,h-190),'자카르타 생활정보  |  저장하고 다시 보기',font=font(38),fill='white')
-    return im
+        # Heavy shadow and outlined white improve readability on photographs.
+        d.text((X(107)+X(3), yy+X(4)),line,font=ft,fill=(0,0,0,200),stroke_width=max(1,X(3)),stroke_fill=(0,0,0,160))
+        d.text((X(107),yy),line,font=ft,fill=(255,255,255,255))
+        yy+=step
+    # Lower-safe-zone info strip; do not place content at screen bottom.
+    d.text((m,X(1622)),'생활에 바로 쓰는 자카르타 정보',font=font(X(37)),fill=(255,255,255,230))
+    bar_y=X(1713)
+    d.rounded_rectangle((m,bar_y,w-m,bar_y+X(13)),radius=X(7),fill=(255,255,255,65))
+    d.rounded_rectangle((m,bar_y,m+int((w-2*m)*(index+1)/5),bar_y+X(13)),radius=X(7),fill=(*accent,255))
+    d.text((m,X(1750)),'SAVE  •  SHARE  •  FOLLOW',font=font(X(31)),fill=(255,255,255,200))
+    return Image.alpha_composite(im.convert('RGBA'),lay).convert('RGB')
 
 def ffmpeg_run(args):
     p=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-hide_banner','-loglevel','error','-y',*args],capture_output=True,text=True)
     if p.returncode: raise RuntimeError(p.stderr[-2000:])
 
-def render(scenes, photos, theme, voice, music_bytes=None, progress=None, quality='빠른 제작 (540p)'):
+def render(scenes, photos, theme, voice, music_bytes=None, progress=None, quality='빠른 제작 (540p)', style='생활정보 + 감각적인 영상'):
     # Render each scene separately; quality affects speed but not subtitle composition.
     quick=quality.startswith('빠른')
     output_size=(540,960) if quick else (1080,1920)
@@ -120,9 +164,7 @@ def render(scenes, photos, theme, voice, music_bytes=None, progress=None, qualit
             from mutagen.mp3 import MP3
             duration=max(3.0, MP3(str(audio)).info.length+0.65)
             photo=photos[i] if i<len(photos) else None
-            frame=create_frame(script,i,photo,theme)
-            if quick:
-                frame=frame.resize(output_size,Image.Resampling.LANCZOS)
+            frame=create_frame(script,i,photo,theme,output_size,style)
             image=wd/f'frame_{i}.jpg';frame.save(image,quality=82 if quick else 90)
             seg=wd/f'seg_{i}.mp4'
             ffmpeg_run(['-loop','1','-framerate',str(fps),'-i',str(image),'-i',str(audio),'-t',str(duration),'-c:v','libx264','-preset','ultrafast' if quick else 'veryfast','-tune','stillimage','-threads','2','-pix_fmt','yuv420p','-r',str(fps),'-af','apad','-c:a','aac','-b:a','96k' if quick else '128k','-ar','44100','-ac','2','-movflags','+faststart',str(seg)])
@@ -140,7 +182,7 @@ def render(scenes, photos, theme, voice, music_bytes=None, progress=None, qualit
         if progress:progress.progress(1.0,text='MP4 완성!')
         return out.read_bytes()
 
-st.title('🎬 Mia Reels Studio 2.0')
+st.title('🎬 Mia Reels Studio 2.1')
 st.caption('주제 한 줄 → 한국어 대본 → 음성 → 자막 포함 9:16 릴스 MP4')
 st.info('처음에는 5개 장면의 사진형 릴스를 만듭니다. 실제 촬영 영상이나 생성형 AI 동영상은 사용하지 않으며, AI API는 선택 사항입니다.')
 topic=st.text_input('① 영상 주제',value='자카르타에서 유용한 생활 앱 3가지')
@@ -168,6 +210,7 @@ st.subheader('④ 디자인 및 음성')
 c1,c2=st.columns(2)
 with c1: theme=st.selectbox('색상 테마',['블루','크림','그린'])
 with c2:voice=st.selectbox('음성',['한국어 기본 음성 (gTTS)'])
+style=st.selectbox('자막과 배경 디자인',['생활정보 + 감각적인 영상','시네마틱 카드형'],help='장면별로 큰 한글 자막과 정보 카드 디자인을 사용합니다.')
 photos_upload=st.file_uploader('선택: 사진 최대 5장 (없으면 기본 배경 사용)',type=['png','jpg','jpeg'],accept_multiple_files=True)
 music_upload=st.file_uploader('선택: 저작권 사용 권한이 있는 MP3 배경음악',type=['mp3'])
 photos=[]
@@ -176,6 +219,11 @@ for f in (photos_upload or [])[:5]:
     except Exception:st.warning(f'{f.name} 사진을 읽을 수 없습니다.')
 if photos:
     st.caption('사진은 업로드한 순서대로 장면에 배치됩니다. 부족한 장면에는 기본 배경이 적용됩니다.')
+st.caption('사진이 없으면 감각적인 추상 배경을 사용합니다. 실제 사진 자동 검색이나 동영상 클립 삽입은 아직 제공하지 않습니다.')
+with st.expander('🎨 장면 디자인 미리보기',expanded=False):
+    if scenes[0]:
+        preview=create_frame(scenes[0],0,photos[0] if photos else None,theme,(540,960),style)
+        st.image(preview,caption='첫 번째 장면 미리보기 (음성 및 영상 제작 전)',width=270)
 st.subheader('⑤ MP4 만들기')
 st.caption('음성 생성은 인터넷이 필요합니다. 긴 영상은 시간이 더 걸리며 무료 서버의 자원 제한을 받을 수 있습니다.')
 quality=st.selectbox('영상 화질 / 제작 속도', ['빠른 제작 (540p)', '고화질 (1080p)'], help='먼저 빠른 제작으로 확인한 뒤 최종 게시용은 고화질을 선택하세요.')
@@ -185,7 +233,7 @@ if st.button('🎥 한국어 음성 + 자막 + MP4 자동 생성',type='primary'
     else:
         try:
             p=st.progress(0,text='준비 중...')
-            data=render(scenes,photos,theme,voice,music_upload.getvalue() if music_upload else None,p,quality)
+            data=render(scenes,photos,theme,voice,music_upload.getvalue() if music_upload else None,p,quality,style)
             st.session_state['video_bytes']=data
             st.success('릴스 영상 완성!')
         except Exception as e:
