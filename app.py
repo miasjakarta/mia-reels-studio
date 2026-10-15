@@ -64,11 +64,13 @@ def create_frame(text, index, photo=None, theme='블루', size=(1080,1920)):
     w,h=size
     colors={'블루':((11,30,65),(24,111,174)), '크림':((35,39,49),(155,117,87)), '그린':((11,55,54),(25,115,90))}
     a,b=colors[theme]
-    im=Image.new('RGB',(w,h)); px=im.load()
+    # A 1-pixel-wide gradient avoids thousands of expensive full-width draw operations.
+    gradient=Image.new('RGB',(1,h))
+    grad_pixels=gradient.load()
     for y in range(h):
-        t=y/(h-1)
-        c=tuple(int(a[k]*(1-t)+b[k]*t) for k in range(3))
-        ImageDraw.Draw(im).line([(0,y),(w,y)],fill=c)
+        t=y/max(h-1,1)
+        grad_pixels[0,y]=tuple(int(a[k]*(1-t)+b[k]*t) for k in range(3))
+    im=gradient.resize((w,h))
     if photo is not None:
         photo=ImageOps.fit(photo.convert('RGB'),(w,h),method=Image.Resampling.LANCZOS,centering=(.5,.5))
         photo=photo.filter(ImageFilter.GaussianBlur(1))
@@ -102,8 +104,11 @@ def ffmpeg_run(args):
     p=subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-hide_banner','-loglevel','error','-y',*args],capture_output=True,text=True)
     if p.returncode: raise RuntimeError(p.stderr[-2000:])
 
-def render(scenes, photos, theme, voice, music_bytes=None, progress=None):
-    # Narration is generated for each scene separately, ensuring scene/caption synchronization.
+def render(scenes, photos, theme, voice, music_bytes=None, progress=None, quality='빠른 제작 (540p)'):
+    # Render each scene separately; quality affects speed but not subtitle composition.
+    quick=quality.startswith('빠른')
+    output_size=(540,960) if quick else (1080,1920)
+    fps=15 if quick else 24
     with tempfile.TemporaryDirectory() as td:
         wd=Path(td); segments=[]
         for i,script in enumerate(scenes):
@@ -116,9 +121,11 @@ def render(scenes, photos, theme, voice, music_bytes=None, progress=None):
             duration=max(3.0, MP3(str(audio)).info.length+0.65)
             photo=photos[i] if i<len(photos) else None
             frame=create_frame(script,i,photo,theme)
-            image=wd/f'frame_{i}.jpg';frame.save(image,quality=90)
+            if quick:
+                frame=frame.resize(output_size,Image.Resampling.LANCZOS)
+            image=wd/f'frame_{i}.jpg';frame.save(image,quality=82 if quick else 90)
             seg=wd/f'seg_{i}.mp4'
-            ffmpeg_run(['-loop','1','-framerate','25','-i',str(image),'-i',str(audio),'-t',str(duration),'-c:v','libx264','-preset','veryfast','-tune','stillimage','-pix_fmt','yuv420p','-r','25','-af','apad','-c:a','aac','-b:a','128k','-ar','44100','-ac','2','-movflags','+faststart',str(seg)])
+            ffmpeg_run(['-loop','1','-framerate',str(fps),'-i',str(image),'-i',str(audio),'-t',str(duration),'-c:v','libx264','-preset','ultrafast' if quick else 'veryfast','-tune','stillimage','-threads','2','-pix_fmt','yuv420p','-r',str(fps),'-af','apad','-c:a','aac','-b:a','96k' if quick else '128k','-ar','44100','-ac','2','-movflags','+faststart',str(seg)])
             segments.append(seg)
             if progress:progress.progress((i+1)/6,text=f'{i+1}/5 장면 완성')
         manifest=wd/'list.txt'
@@ -133,7 +140,7 @@ def render(scenes, photos, theme, voice, music_bytes=None, progress=None):
         if progress:progress.progress(1.0,text='MP4 완성!')
         return out.read_bytes()
 
-st.title('🎬 Mia Reels Studio')
+st.title('🎬 Mia Reels Studio 2.0')
 st.caption('주제 한 줄 → 한국어 대본 → 음성 → 자막 포함 9:16 릴스 MP4')
 st.info('처음에는 5개 장면의 사진형 릴스를 만듭니다. 실제 촬영 영상이나 생성형 AI 동영상은 사용하지 않으며, AI API는 선택 사항입니다.')
 topic=st.text_input('① 영상 주제',value='자카르타에서 유용한 생활 앱 3가지')
@@ -145,7 +152,7 @@ if mode.startswith('OpenAI'):
 if 'scenes' not in st.session_state:st.session_state.scenes=default_scenes(topic)
 if st.button('✨ 5개 장면 대본 만들기',type='primary'):
     if not topic.strip():st.error('주제를 입력하세요.')
-    elif mode.startswith('OpenAI') and not api_key:st.error('API 키를 입력하세요.')
+    elif mode.startswith('OpenAI') and not api_key:st.error('Streamlit Secrets에서 OPENAI_API_KEY 설정을 확인하세요.')
     else:
         try:
             with st.spinner('대본 작성 중...'):
@@ -170,16 +177,20 @@ for f in (photos_upload or [])[:5]:
 if photos:
     st.caption('사진은 업로드한 순서대로 장면에 배치됩니다. 부족한 장면에는 기본 배경이 적용됩니다.')
 st.subheader('⑤ MP4 만들기')
-st.caption('음성 생성은 인터넷이 필요합니다. 영상 합성은 기기 성능에 따라 수 분 걸릴 수 있습니다.')
+st.caption('음성 생성은 인터넷이 필요합니다. 긴 영상은 시간이 더 걸리며 무료 서버의 자원 제한을 받을 수 있습니다.')
+quality=st.selectbox('영상 화질 / 제작 속도', ['빠른 제작 (540p)', '고화질 (1080p)'], help='먼저 빠른 제작으로 확인한 뒤 최종 게시용은 고화질을 선택하세요.')
+st.caption('빠른 제작은 540×960 / 15fps, 고화질은 1080×1920 / 24fps로 출력합니다.')
 if st.button('🎥 한국어 음성 + 자막 + MP4 자동 생성',type='primary',use_container_width=True):
     if not all(scenes):st.error('5개 장면의 문구를 모두 입력해 주세요.')
     else:
         try:
             p=st.progress(0,text='준비 중...')
-            data=render(scenes,photos,theme,voice,music_upload.getvalue() if music_upload else None,p)
+            data=render(scenes,photos,theme,voice,music_upload.getvalue() if music_upload else None,p,quality)
             st.session_state['video_bytes']=data
             st.success('릴스 영상 완성!')
-        except Exception as e:st.error(f'영상 생성 실패: {e}. 인터넷 연결 및 설치 안내를 확인해 주세요.')
+        except Exception as e:
+            st.error(f'영상 생성 실패: {e}')
+            st.info('긴 대본이라면 빠른 제작 (540p)으로 재시도하세요. 실패 시 Manage app의 로그를 확인하세요.')
 if st.session_state.get('video_bytes'):
     st.video(st.session_state.video_bytes)
     st.download_button('⬇️ 완성된 릴스 MP4 다운로드',data=st.session_state.video_bytes,file_name='mia_reels.mp4',mime='video/mp4',use_container_width=True)
