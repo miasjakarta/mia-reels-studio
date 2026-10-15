@@ -140,7 +140,7 @@ topic=st.text_input('① 영상 주제',value='자카르타에서 유용한 생�
 mode=st.radio('② 대본 작성', ['무료 기본 대본','OpenAI로 대본 작성 (API 요금 발생)'],horizontal=True)
 api_key='';model='gpt-4o-mini'
 if mode.startswith('OpenAI'):
-    api_key=st.text_input('OpenAI API 키 (저장되지 않음)',type='password')
+        api_key=st.secrets.get('OPENAI_API_KEY', '')
     model=st.text_input('모델 이름',value='gpt-4o-mini')
 if 'scenes' not in st.session_state:st.session_state.scenes=default_scenes(topic)
 if st.button('✨ 5개 장면 대본 만들기',type='primary'):
